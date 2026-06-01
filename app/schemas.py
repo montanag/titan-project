@@ -21,18 +21,28 @@ class TenantCreate(BaseModel):
     name: str | None = None
 
 
-class BookOut(BaseModel):
+class BookOutSliver(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    work_key: str
     title: str
     first_publish_year: int | None
     author_names: list[str]
     subjects: list[str]
     cover_url: str | None
     created_at: datetime
+
+class BookOut(BookOutSliver):
+    work_key: str
     updated_at: datetime
+
+class BookVersionsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    work_key: str
+    updated_at: datetime
+    versions: list[BookOutSliver]
 
 
 class BookListOut(BaseModel):

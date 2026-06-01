@@ -1,4 +1,4 @@
-"""Gap detection + normalization into a canonical BookRecord.
+"""Gap detection + normalization into canonical base + version records.
 
 This is the brains of the "search-first" strategy: a search.json doc usually
 has everything, so we only flag the fields it's missing and let the worker
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.types import BookRecord
+from app.types import BookBaseRecord, BookVersionRecord
 
 
 @dataclass(frozen=True)
@@ -40,13 +40,13 @@ def _first_year(value) -> int | None:
     return None
 
 
-def build_record(
+def build_records(
     doc: dict,
     *,
     work: dict | None = None,
     author_names: list[str] | None = None,
     cover_url: str | None = None,
-) -> BookRecord:
+) -> tuple[BookBaseRecord, BookVersionRecord]:
     """Merge a search doc with optional enrichment into a canonical record.
 
     Precedence: search values first (they're already flattened), then fall
@@ -73,8 +73,7 @@ def build_record(
         if first:
             cover_url = f"https://covers.openlibrary.org/b/id/{first}-L.jpg"
 
-    return BookRecord(
-        work_key=doc["key"],
+    return BookBaseRecord(work_key=doc["key"]), BookVersionRecord(
         title=title,
         first_publish_year=year,
         author_names=names,

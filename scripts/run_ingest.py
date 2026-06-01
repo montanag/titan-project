@@ -12,13 +12,13 @@ from __future__ import annotations
 import logging
 import sys
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.db import init_db, session_scope
-from app.db_models import Book, IngestionRun
+from app.db_models import IngestionRun
 from app.ingestion import run_job_inline
 from app.openlibrary import OpenLibraryClient
-from app.repository import ensure_tenant
+from app.repository import ensure_tenant, list_books
 from app.types import IngestJob
 
 
@@ -45,12 +45,7 @@ def main(argv: list[str]) -> int:
 
     # Read back what we stored, scoped to this tenant.
     with session_scope() as session:
-        total = session.scalar(
-            select(func.count()).select_from(Book).where(Book.tenant_id == tenant_id)
-        )
-        sample = session.scalars(
-            select(Book).where(Book.tenant_id == tenant_id).order_by(Book.title).limit(3)
-        ).all()
+        total, sample = list_books(session, tenant_id, limit=3, offset=0)
         runs = session.scalars(
             select(IngestionRun)
             .where(IngestionRun.tenant_id == tenant_id)

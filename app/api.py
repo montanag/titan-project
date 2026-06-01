@@ -24,6 +24,8 @@ from app.reading_lists import resolve_reading_list
 from app.schemas import (
     BookListOut,
     BookOut,
+    BookOutSliver,
+    BookVersionsOut,
     IngestRequest,
     ReadingListResult,
     ReadingListSubmit,
@@ -128,6 +130,23 @@ def get_book(book_id: uuid.UUID, tenant: TenantDep, db: DbDep) -> BookOut:
     if book is None:
         raise HTTPException(status_code=404, detail="Book not found")
     return BookOut.model_validate(book)
+
+@app.get("/books/{book_id}/versions", response_model=BookVersionsOut)
+def get_book_versions(book_id: uuid.UUID, tenant: TenantDep, db: DbDep) -> BookVersionsOut:
+    book = repo.get_book(db, tenant.id, book_id)
+    if book is None:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    versions = repo.list_book_versions(db, tenant.id, book_id)
+    if not versions:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    return BookVersionsOut(
+        id=book.id,
+        work_key=book.work_key,
+        updated_at=book.updated_at,
+        versions=[BookOutSliver.model_validate(v) for v in versions]
+    )
 
 
 # -- activity log (Tier 1) --------------------------------------------------

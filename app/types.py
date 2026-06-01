@@ -6,6 +6,7 @@ Kept separate from the ORM models so the worker pipeline has no DB coupling
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 
 
@@ -13,16 +14,21 @@ from dataclasses import dataclass, field
 class IngestJob:
     """A unit of ingestion work. This is what a queue would carry later."""
 
-    tenant_id: str
+    tenant_id: uuid.UUID
     kind: str  # "author" | "subject"
     value: str
 
-
 @dataclass
-class BookRecord:
-    """Canonical, normalized book ready to persist."""
+class BookBaseRecord:
+    """The raw normalized book record, before any tenant-specific processing."""
 
     work_key: str
+
+
+@dataclass
+class BookVersionRecord:
+    """A fully normalized book record, ready to persist."""
+
     title: str
     first_publish_year: int | None
     author_names: list[str]

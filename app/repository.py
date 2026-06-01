@@ -7,20 +7,22 @@ stamped with it; the (tenant_id, work_key) upsert keeps ingestion idempotent.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.db_models import (
     AuthorCache,
-    Book,
+    BookBase,
+    BookVersion,
     IngestionRun,
     ReadingListSubmission,
     Tenant,
 )
-from app.types import BookRecord, IngestionResult
+from app.types import BookBaseRecord, BookVersionRecord, IngestionResult
 
 
 # -- tenants ----------------------------------------------------------------
@@ -53,12 +55,80 @@ def upsert_author_cache(session: Session, author_key: str, name: str | None, raw
     session.execute(stmt)
 
 
-# -- books ------------------------------------------------------------------
+# -- books: identity + version tracking (Tier 3) ----------------------------
+#
+# A book's identity (BookBase) is separated from its metadata snapshots
+# (BookVersion). Each ingestion compares the freshly-normalized record against
+# the latest stored version and appends a NEW version only when something
+# changed — so history is preserved and we never overwrite. A regression (a
+# field that previously had a value and is now missing) is just another change:
+# it produces a new version recording the now-empty value, rather than being
+# silently dropped or crashing.
 
-def upsert_book(session: Session, tenant_id: uuid.UUID, record: BookRecord) -> None:
-    stmt = insert(Book).values(
-        tenant_id=tenant_id,
-        work_key=record.work_key,
+# Metadata fields that define a version; a change in any of them is a new version.
+_VERSIONED_FIELDS = ("title", "first_publish_year", "author_names", "subjects", "cover_url")
+
+
+def upsert_book_base(session: Session, tenant_id: uuid.UUID, record: BookBaseRecord) -> uuid.UUID:
+    """Ensure the (tenant, work_key) identity row exists and return its id.
+
+    Idempotent: INSERT ... ON CONFLICT DO NOTHING, then read the id back (the
+    RETURNING clause yields nothing on conflict, so we fall back to a select)."""
+    book_id = session.scalar(
+        insert(BookBase)
+        .values(tenant_id=tenant_id, work_key=record.work_key)
+        .on_conflict_do_nothing(constraint="uq_books_tenant_work")
+        .returning(BookBase.id)
+    )
+    if book_id is None:  # row already existed
+        book_id = session.scalar(
+            select(BookBase.id).where(
+                BookBase.tenant_id == tenant_id, BookBase.work_key == record.work_key
+            )
+        )
+    return book_id
+
+
+def get_latest_version(session: Session, book_id: uuid.UUID) -> BookVersion | None:
+    return session.scalar(
+        select(BookVersion)
+        .where(BookVersion.book_id == book_id)
+        .order_by(BookVersion.created_at.desc())
+        .limit(1)
+    )
+
+
+def diff_versions(prev, curr) -> dict[str, dict]:
+    """Field-level changes between two version-like objects (ORM rows or records).
+
+    Returns ``{field: {"from": old, "to": new}}`` for each differing versioned
+    field. Lists are compared by value; None vs a value (a regression, or a
+    newly-populated field) shows up like any other change.
+    """
+    changes: dict[str, dict] = {}
+    for field_name in _VERSIONED_FIELDS:
+        old = getattr(prev, field_name)
+        new = getattr(curr, field_name)
+        if isinstance(old, (list, tuple)) or isinstance(new, (list, tuple)):
+            old = list(old or [])
+            new = list(new or [])
+        if old != new:
+            changes[field_name] = {"from": old, "to": new}
+    return changes
+
+
+def add_version_if_changed(
+    session: Session, book_id: uuid.UUID, record: BookVersionRecord
+) -> BookVersion | None:
+    """Append a new version iff the metadata differs from the latest one.
+
+    Returns the newly-created version, or None when nothing changed (no-op)."""
+    latest = get_latest_version(session, book_id)
+    if latest is not None and not diff_versions(latest, record):
+        return None
+
+    version = BookVersion(
+        book_id=book_id,
         title=record.title,
         first_publish_year=record.first_publish_year,
         author_names=record.author_names,
@@ -66,22 +136,75 @@ def upsert_book(session: Session, tenant_id: uuid.UUID, record: BookRecord) -> N
         cover_url=record.cover_url,
         raw=record.raw,
     )
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_books_tenant_work",
-        set_={
-            "title": stmt.excluded.title,
-            "first_publish_year": stmt.excluded.first_publish_year,
-            "author_names": stmt.excluded.author_names,
-            "subjects": stmt.excluded.subjects,
-            "cover_url": stmt.excluded.cover_url,
-            "raw": stmt.excluded.raw,
-            "updated_at": datetime.now(timezone.utc),
-        },
-    )
-    session.execute(stmt)
+    session.add(version)
+    session.flush()
+    return version
+
+
+def store_book(
+    session: Session,
+    tenant_id: uuid.UUID,
+    base_record: BookBaseRecord,
+    version_record: BookVersionRecord,
+) -> BookVersion | None:
+    """Ingestion entry point: ensure identity, then version-on-change.
+
+    Returns the new version (book newly seen, or metadata changed) or None if
+    the record matched the current version exactly."""
+    book_id = upsert_book_base(session, tenant_id, base_record)
+    return add_version_if_changed(session, book_id, version_record)
 
 
 # -- book queries (retrieval API) -------------------------------------------
+#
+# The catalog views a book as its current (latest) version. We pick the latest
+# version per book with a "no newer version exists" predicate, which keeps the
+# BookVersion ORM columns (and their ARRAY operators) intact for filtering.
+
+def _is_latest_version():
+    newer = aliased(BookVersion)
+    return ~exists(
+        select(newer.id).where(
+            newer.book_id == BookVersion.book_id,
+            newer.created_at > BookVersion.created_at,
+        )
+    )
+
+
+@dataclass
+class BookView:
+    """Flattened current-version view of a book for the retrieval API."""
+
+    id: uuid.UUID
+    work_key: str
+    title: str
+    first_publish_year: int | None
+    author_names: list[str]
+    subjects: list[str]
+    cover_url: str | None
+    created_at: datetime  # when the book was first ingested
+    updated_at: datetime  # when the current version was recorded
+
+
+def _to_view(base: BookBase, version: BookVersion) -> BookView:
+    return BookView(
+        id=base.id,
+        work_key=base.work_key,
+        title=version.title,
+        first_publish_year=version.first_publish_year,
+        author_names=list(version.author_names),
+        subjects=list(version.subjects),
+        cover_url=version.cover_url,
+        created_at=base.created_at,
+        updated_at=version.created_at,
+    )
+
+@dataclass
+class BookHistoryView:
+    id: uuid.UUID
+    work_key: str
+    versions: list[BookView]
+
 
 def _apply_book_filters(
     stmt: Select,
@@ -92,21 +215,22 @@ def _apply_book_filters(
     year_max: int | None,
     q: str | None,
 ) -> Select:
-    """Compose the optional filters. Filters are precise; `q` is fuzzy."""
+    """Compose the optional filters over the current version. Filters are
+    precise; `q` is fuzzy."""
     if author:
         # Forgiving partial match across the author list.
-        joined = func.array_to_string(Book.author_names, " ")
+        joined = func.array_to_string(BookVersion.author_names, " ")
         stmt = stmt.where(joined.ilike(f"%{author}%"))
     if subject:
         # Exact membership in the subjects array (subjects @> ARRAY[subject]).
-        stmt = stmt.where(Book.subjects.contains([subject]))
+        stmt = stmt.where(BookVersion.subjects.contains([subject]))
     if year_min is not None:
-        stmt = stmt.where(Book.first_publish_year >= year_min)
+        stmt = stmt.where(BookVersion.first_publish_year >= year_min)
     if year_max is not None:
-        stmt = stmt.where(Book.first_publish_year <= year_max)
+        stmt = stmt.where(BookVersion.first_publish_year <= year_max)
     if q:
-        joined = func.array_to_string(Book.author_names, " ")
-        stmt = stmt.where(or_(Book.title.ilike(f"%{q}%"), joined.ilike(f"%{q}%")))
+        joined = func.array_to_string(BookVersion.author_names, " ")
+        stmt = stmt.where(or_(BookVersion.title.ilike(f"%{q}%"), joined.ilike(f"%{q}%")))
     return stmt
 
 
@@ -121,21 +245,45 @@ def list_books(
     q: str | None = None,
     limit: int = 25,
     offset: int = 0,
-) -> tuple[int, list[Book]]:
-    base = select(Book).where(Book.tenant_id == tenant_id)
+) -> tuple[int, list[BookView]]:
+    base = (
+        select(BookBase, BookVersion)
+        .join(BookVersion, BookVersion.book_id == BookBase.id)
+        .where(BookBase.tenant_id == tenant_id, _is_latest_version())
+    )
     base = _apply_book_filters(
         base, author=author, subject=subject, year_min=year_min, year_max=year_max, q=q
     )
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
-    rows = session.scalars(
-        base.order_by(Book.title).limit(limit).offset(offset)
+    rows = session.execute(
+        base.order_by(BookVersion.title).limit(limit).offset(offset)
     ).all()
-    return total, list(rows)
+    return total, [_to_view(b, v) for b, v in rows]
 
 
-def get_book(session: Session, tenant_id: uuid.UUID, book_id: uuid.UUID) -> Book | None:
-    return session.scalar(
-        select(Book).where(Book.id == book_id, Book.tenant_id == tenant_id)
+def get_book(session: Session, tenant_id: uuid.UUID, book_id: uuid.UUID) -> BookView | None:
+    row = session.execute(
+        select(BookBase, BookVersion)
+        .join(BookVersion, BookVersion.book_id == BookBase.id)
+        .where(BookBase.id == book_id, BookBase.tenant_id == tenant_id, _is_latest_version())
+    ).first()
+    return _to_view(row[0], row[1]) if row else None
+
+
+def list_book_versions(
+    session: Session, tenant_id: uuid.UUID, book_id: uuid.UUID
+) -> list[BookVersion]:
+    """Full version history for a book (oldest → newest), tenant-scoped.
+
+    Backs a version-history endpoint; pair consecutive versions with
+    ``diff_versions`` to show what changed between them."""
+    return list(
+        session.scalars(
+            select(BookVersion)
+            .join(BookBase, BookBase.id == BookVersion.book_id)
+            .where(BookBase.id == book_id, BookBase.tenant_id == tenant_id)
+            .order_by(BookVersion.created_at.asc())
+        ).all()
     )
 
 
@@ -226,12 +374,15 @@ def list_submissions(
 def work_keys_present(
     session: Session, tenant_id: uuid.UUID, work_keys: list[str]
 ) -> set[str]:
-    """Subset of the given work keys that exist in this tenant's catalog."""
+    """Subset of the given work keys that exist in this tenant's catalog.
+
+    Presence is an identity question, so it queries BookBase — a book counts as
+    present as soon as it has been ingested, independent of its versions."""
     if not work_keys:
         return set()
     rows = session.scalars(
-        select(Book.work_key).where(
-            Book.tenant_id == tenant_id, Book.work_key.in_(work_keys)
+        select(BookBase.work_key).where(
+            BookBase.tenant_id == tenant_id, BookBase.work_key.in_(work_keys)
         )
     ).all()
     return set(rows)

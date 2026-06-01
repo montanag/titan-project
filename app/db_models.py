@@ -35,11 +35,11 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    books: Mapped[list[Book]] = relationship(back_populates="tenant")
+    books: Mapped[list[BookBase]] = relationship(back_populates="tenant")
 
 
-class Book(Base):
-    __tablename__ = "books"
+class BookBase(Base):
+    __tablename__ = "books_base"
     __table_args__ = (UniqueConstraint("tenant_id", "work_key", name="uq_books_tenant_work"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -48,6 +48,23 @@ class Book(Base):
     )
 
     work_key: Mapped[str] = mapped_column(String(64), index=True)  # e.g. "/works/OL45883W"
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="books")
+
+class BookVersion(Base):
+    __tablename__ = "book_versions"
+    __table_args__ = (UniqueConstraint("book_id", "created_at", name="uq_book_versions_book_created"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    book_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("books_base.id", ondelete="CASCADE"), index=True
+    )
+
     title: Mapped[str] = mapped_column(Text)
     first_publish_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     author_names: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
@@ -58,11 +75,6 @@ class Book(Base):
     raw: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    tenant: Mapped[Tenant] = relationship(back_populates="books")
 
 
 class AuthorCache(Base):

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.config import settings
-from app.normalize import author_key_path, build_record, detect_gaps
+from app.normalize import author_key_path, build_records, detect_gaps
 from app.openlibrary import OpenLibraryClient, OpenLibraryError
 from app.types import IngestionResult, IngestJob
 
@@ -88,8 +88,10 @@ def run_ingestion(
                         )
 
                     cover_url = client.cover_url(doc.get("cover_i"))
-                    record = build_record(doc, work=work, author_names=names, cover_url=cover_url)
-                    repo.upsert_book(session, job.tenant_id, record)
+                    base_record, version_record = build_records(
+                        doc, work=work, author_names=names, cover_url=cover_url
+                    )
+                    repo.store_book(session, job.tenant_id, base_record, version_record)
                     result.succeeded += 1
                 except (OpenLibraryError, ValueError, KeyError) as exc:
                     log.warning("failed to ingest %s: %s", work_key, exc)
