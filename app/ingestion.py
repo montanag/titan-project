@@ -47,15 +47,20 @@ def _resolve_author_names(
 
 
 def run_ingestion(
+    run_id,
     job: IngestJob,
     *,
     session: Session,
     client: OpenLibraryClient,
     max_pages: int,
 ) -> IngestionResult:
-    """Execute one ingestion job against the live Open Library API."""
+    """Execute one already-created ingestion run against the live OL API.
+
+    The run row (status 'running') is the durable job; this fills in counts
+    and flips it to a terminal status. It does NOT create the run — the queue
+    (enqueue + claim) owns the run's lifecycle up to this point.
+    """
     result = IngestionResult()
-    run_id = repo.create_run(session, job.tenant_id, job.kind, job.value)
     author_cache: dict[str, str | None] = {}
     status = "succeeded"
 
@@ -101,3 +106,20 @@ def run_ingestion(
 
     repo.finalize_run(session, run_id, result, status)
     return result
+
+
+def run_job_inline(
+    job: IngestJob,
+    *,
+    session: Session,
+    client: OpenLibraryClient,
+    max_pages: int,
+) -> IngestionResult:
+    """Enqueue a job and run it synchronously in the caller's session.
+
+    Convenience for the CLI/dev path and tests — exercises the full
+    enqueue → claim → run lifecycle without a separate worker process.
+    """
+    run_id = repo.enqueue_run(session, job.tenant_id, job.kind, job.value)
+    repo.mark_running(session, run_id)
+    return run_ingestion(run_id, job, session=session, client=client, max_pages=max_pages)

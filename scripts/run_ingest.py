@@ -4,7 +4,7 @@ Usage:
     uv run python -m scripts.run_ingest <tenant-slug> <author|subject> "<value>"
 
 Example:
-    uv run python -m scripts.run_ingest demo author "Ursula K. Le Guin"
+    uv run python -m scripts.run_ingest demo author "Charlotte Lamb"
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 
 from app.db import init_db, session_scope
 from app.db_models import Book, IngestionRun
-from app.ingestion import run_ingestion
+from app.ingestion import run_job_inline
 from app.openlibrary import OpenLibraryClient
 from app.repository import ensure_tenant
 from app.types import IngestJob
@@ -36,7 +36,7 @@ def main(argv: list[str]) -> int:
         tenant = ensure_tenant(session, slug)
         tenant_id = tenant.id
         job = IngestJob(tenant_id=tenant_id, kind=kind, value=value)
-        result = run_ingestion(job, session=session, client=client, max_pages=2)
+        result = run_job_inline(job, session=session, client=client, max_pages=2)
 
     print("\n=== ingestion result ===")
     print(f"fetched={result.fetched} succeeded={result.succeeded} failed={result.failed}")

@@ -26,5 +26,18 @@ class Settings(BaseSettings):
     max_pages_per_run: int = 5
     search_page_size: int = 100
 
+    # Background worker.
+    worker_poll_interval_seconds: float = 2.0
+
+    # PII handling. The pepper is mixed into the email HMAC so the dedup hash
+    # is not reversible via a rainbow table. MUST be overridden in production
+    # (TITAN_PII_PEPPER); the default is for local dev only.
+    pii_pepper: str = "dev-only-insecure-pepper-change-me"
+
+    # Catalog freshness — re-sync a job if its last run finished longer ago
+    # than this. Defaults are short so the behavior is observable in a demo.
+    freshness_interval_seconds: float = 86400.0  # 24h
+    scheduler_tick_seconds: float = 30.0
+
 
 settings = Settings()
