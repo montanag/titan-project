@@ -179,3 +179,5 @@ Want me to do PII reading lists next, the freshness scheduler, or wire up the co
 ## 2026-06-01 17:35:28
 
 **User:** Let's move into tier 2
+
+**Assistant:** Scheduler works: it tracked all 5 distinct jobs, re-enqueued the 5 stale ones on tick 1, and correctly re-enqueued **0** on tick 2 (dedup — they're now active). Those 5 queued rows were just test artifacts (I forced freshness=0); let me clean them up and stop the test server.

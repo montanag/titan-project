@@ -15,14 +15,21 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app import pii
 from app import repository as repo
 from app.db import SessionLocal, init_db
 from app.db_models import IngestionRun, Tenant
+from app.openlibrary import OpenLibraryClient
+from app.reading_lists import resolve_reading_list
 from app.schemas import (
     BookListOut,
     BookOut,
     IngestRequest,
+    ReadingListResult,
+    ReadingListSubmit,
+    ResolvedBook,
     RunOut,
+    SubmissionOut,
     TenantCreate,
     TenantOut,
 )
@@ -34,6 +41,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Titan — Open Library Catalog", version="0.1.0", lifespan=lifespan)
+
+# Shared OL client (reused HTTP session + rate-limit state) for ISBN lookups
+# during reading-list resolution. Catalog ingestion runs in the worker, not here.
+_ol_client = OpenLibraryClient()
 
 
 # -- dependencies -----------------------------------------------------------
@@ -145,3 +156,48 @@ def ingest(body: IngestRequest, tenant: TenantDep, db: DbDep) -> RunOut:
     db.flush()
     run = db.get(IngestionRun, run_id)
     return RunOut.model_validate(run)
+
+
+# -- reading list submissions (Tier 2 PII) ----------------------------------
+
+@app.post("/reading-lists", response_model=ReadingListResult, status_code=201)
+def submit_reading_list(body: ReadingListSubmit, tenant: TenantDep, db: DbDep) -> ReadingListResult:
+    """Accept a patron reading list. PII is hashed/masked before persistence;
+    the plaintext name/email never touch the database."""
+    email = str(body.email)
+    phash = pii.patron_hash(email)
+    is_returning = repo.count_submissions_for_patron(db, tenant.id, phash) > 0
+
+    resolution = resolve_reading_list(db, tenant.id, _ol_client, body.books)
+
+    sub = repo.create_submission(
+        db,
+        tenant.id,
+        patron_hash=phash,
+        name_masked=pii.mask_name(body.name),
+        email_masked=pii.mask_email(email),
+        requested=body.books,
+        resolved=resolution.resolved_keys,
+        unresolved=resolution.unresolved,
+    )
+
+    return ReadingListResult(
+        id=sub.id,
+        patron_ref=phash[:12],
+        is_returning_patron=is_returning,
+        requested_count=len(body.books),
+        resolved=[ResolvedBook(**r) for r in resolution.resolved],
+        unresolved=resolution.unresolved,
+    )
+
+
+@app.get("/reading-lists", response_model=list[SubmissionOut])
+def list_reading_lists(
+    tenant: TenantDep,
+    db: DbDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[SubmissionOut]:
+    """Staff view of submissions — masked PII only."""
+    _total, subs = repo.list_submissions(db, tenant.id, limit=limit, offset=offset)
+    return [SubmissionOut.model_validate(s) for s in subs]

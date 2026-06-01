@@ -76,6 +76,28 @@ class AuthorCache(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ReadingListSubmission(Base):
+    """A patron's reading list. Holds NO plaintext PII — only the irreversible
+    ``patron_hash`` (for dedup) and masked display strings."""
+
+    __tablename__ = "reading_list_submissions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+
+    patron_hash: Mapped[str] = mapped_column(String(64), index=True)  # HMAC-SHA256 hex
+    name_masked: Mapped[str] = mapped_column(Text)
+    email_masked: Mapped[str] = mapped_column(Text)
+
+    requested: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    resolved: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    unresolved: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class IngestionRun(Base):
     """One row per ingestion operation — backs the Activity Log endpoint."""
 

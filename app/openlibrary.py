@@ -26,6 +26,10 @@ class OpenLibraryError(RuntimeError):
     pass
 
 
+class OpenLibraryNotFound(OpenLibraryError):
+    """A 404 — the resource does not exist (not retryable, not an outage)."""
+
+
 class OpenLibraryClient:
     def __init__(self, *, session: requests.Session | None = None) -> None:
         self._session = session or requests.Session()
@@ -54,6 +58,10 @@ class OpenLibraryClient:
         """Author record, e.g. author_key='/authors/OL23919A'."""
         return self._get_json(f"{settings.openlibrary_base_url}{author_key}.json")
 
+    def get_by_isbn(self, isbn: str) -> dict:
+        """Edition record for an ISBN; raises OpenLibraryNotFound if unknown."""
+        return self._get_json(f"{settings.openlibrary_base_url}/isbn/{isbn}.json")
+
     def cover_url(self, cover_id: int | None, size: str = "L") -> str | None:
         if not cover_id:
             return None
@@ -68,21 +76,33 @@ class OpenLibraryClient:
             time.sleep(wait)
 
     def _get_json(self, url: str, *, params: dict | None = None) -> dict:
+        """GET + parse JSON. Retries only transient failures (429/5xx/network);
+        4xx is a definitive answer and is raised immediately (404 → NotFound)."""
         last_exc: Exception | None = None
         for attempt in range(settings.max_retries + 1):
             self._throttle()
             try:
                 resp = self._session.get(url, params=params, timeout=settings.request_timeout_seconds)
                 self._last_request_at = time.monotonic()
-                if resp.status_code == 429 or resp.status_code >= 500:
-                    raise OpenLibraryError(f"{resp.status_code} from {resp.url}")
-                resp.raise_for_status()
-                return resp.json()
-            except (requests.RequestException, OpenLibraryError, ValueError) as exc:
+            except requests.RequestException as exc:
+                # Network-level failure → transient, retry.
                 last_exc = exc
                 self._last_request_at = time.monotonic()
-                if attempt < settings.max_retries:
-                    backoff = settings.retry_backoff_base_seconds * (2**attempt)
-                    log.warning("OL request failed (%s); retry %d in %.1fs", exc, attempt + 1, backoff)
-                    time.sleep(backoff)
+            else:
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last_exc = OpenLibraryError(f"{resp.status_code} from {resp.url}")
+                elif resp.status_code == 404:
+                    raise OpenLibraryNotFound(f"404 from {resp.url}")
+                elif resp.status_code >= 400:
+                    raise OpenLibraryError(f"{resp.status_code} from {resp.url}")
+                else:
+                    try:
+                        return resp.json()
+                    except ValueError as exc:
+                        raise OpenLibraryError(f"invalid JSON from {resp.url}") from exc
+
+            if attempt < settings.max_retries:
+                backoff = settings.retry_backoff_base_seconds * (2**attempt)
+                log.warning("OL request failed (%s); retry %d in %.1fs", last_exc, attempt + 1, backoff)
+                time.sleep(backoff)
         raise OpenLibraryError(f"giving up on {url} after retries: {last_exc}")

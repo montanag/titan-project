@@ -13,7 +13,13 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db_models import AuthorCache, Book, IngestionRun, Tenant
+from app.db_models import (
+    AuthorCache,
+    Book,
+    IngestionRun,
+    ReadingListSubmission,
+    Tenant,
+)
 from app.types import BookRecord, IngestionResult
 
 
@@ -144,6 +150,91 @@ def list_runs(
         base.order_by(IngestionRun.requested_at.desc()).limit(limit).offset(offset)
     ).all()
     return total, list(rows)
+
+
+def latest_run_per_job(session: Session) -> list[IngestionRun]:
+    """Most recent run for each distinct (tenant, kind, value) job, all tenants.
+
+    Backs the freshness scheduler: it decides what to re-sync by looking at
+    each job's latest run (its status + finished_at).
+    """
+    return list(
+        session.scalars(
+            select(IngestionRun)
+            .distinct(IngestionRun.tenant_id, IngestionRun.kind, IngestionRun.value)
+            .order_by(
+                IngestionRun.tenant_id,
+                IngestionRun.kind,
+                IngestionRun.value,
+                IngestionRun.requested_at.desc(),
+            )
+        ).all()
+    )
+
+
+# -- reading list submissions (PII) -----------------------------------------
+
+def create_submission(
+    session: Session,
+    tenant_id: uuid.UUID,
+    *,
+    patron_hash: str,
+    name_masked: str,
+    email_masked: str,
+    requested: list[str],
+    resolved: list[str],
+    unresolved: list[str],
+) -> ReadingListSubmission:
+    sub = ReadingListSubmission(
+        tenant_id=tenant_id,
+        patron_hash=patron_hash,
+        name_masked=name_masked,
+        email_masked=email_masked,
+        requested=requested,
+        resolved=resolved,
+        unresolved=unresolved,
+    )
+    session.add(sub)
+    session.flush()
+    return sub
+
+
+def count_submissions_for_patron(
+    session: Session, tenant_id: uuid.UUID, patron_hash: str
+) -> int:
+    return session.scalar(
+        select(func.count())
+        .select_from(ReadingListSubmission)
+        .where(
+            ReadingListSubmission.tenant_id == tenant_id,
+            ReadingListSubmission.patron_hash == patron_hash,
+        )
+    ) or 0
+
+
+def list_submissions(
+    session: Session, tenant_id: uuid.UUID, *, limit: int = 25, offset: int = 0
+) -> tuple[int, list[ReadingListSubmission]]:
+    base = select(ReadingListSubmission).where(ReadingListSubmission.tenant_id == tenant_id)
+    total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rows = session.scalars(
+        base.order_by(ReadingListSubmission.created_at.desc()).limit(limit).offset(offset)
+    ).all()
+    return total, list(rows)
+
+
+def work_keys_present(
+    session: Session, tenant_id: uuid.UUID, work_keys: list[str]
+) -> set[str]:
+    """Subset of the given work keys that exist in this tenant's catalog."""
+    if not work_keys:
+        return set()
+    rows = session.scalars(
+        select(Book.work_key).where(
+            Book.tenant_id == tenant_id, Book.work_key.in_(work_keys)
+        )
+    ).all()
+    return set(rows)
 
 
 
