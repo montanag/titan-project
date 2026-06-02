@@ -187,3 +187,13 @@ Want me to do PII reading lists next, the freshness scheduler, or wire up the co
 **User:** Can we take a look at our repository file and continue modifying it for the in-progress book version tracking changes? Just modify this file for now.
 
 **Assistant:** Let me verify the file imports cleanly and is internally coherent (importing just this module, not the app):
+
+## 2026-06-01 18:56:29
+
+**User:** Can we generate a better readme.md for this repo? Disregard the existing readme
+
+## 2026-06-01 18:56:55
+
+**User:** Can we generate a better readme.md for this repo? Disregard the existing readme
+
+**Assistant:** `app/models/`, `app/routers/books.py`, and `app/main.py` are empty/stub scaffolding not wired into the running app (the real app is `app.api:app`), so I'll document the working system. Writing the new README now:
