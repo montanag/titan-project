@@ -329,6 +329,9 @@ docker-compose.yml Postgres 17
   existing `diff_versions` helper) directly in the versions endpoint.
 - **Authorz & rate limiting on the API itself** (auth per tenant, request
   limits) — out of scope here but needed before this faces real traffic.
+- **Project structure.** The current flat `app/` is fine for this size codebase, but as it grows I'd split into submodules (`app.api`, `app.db`, `app.ingestion`, etc.) for better organization and to avoid a monolithic `api.py`.
+- **Code auditing.** This app has been largely produced using AI tools. Manual tests and code review was conducted at each stage, but none-the-less this codebase needs more time and testing to be confident in.
+- **Document manual tests** For the purposes of an interview, the manual testing documented at each step hasn't been well documented. Largely, these manual tests utilized curl and direct db queries with some in-code print statements. The only of these that has even been somewhat documented is the curl commands, which are in `CURL.md`. A more thorough documentation of the manual testing process and results would be needed to have display the dev process.
 
 ---
 
